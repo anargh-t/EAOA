@@ -48,8 +48,10 @@ class CIFAR10(object):
         else:
             self.labeled_ind_train, self.unlabeled_ind_train = labeled_ind_train, unlabeled_ind_train
 
+        #trainloader, unlabeledloader, and testloader using subsetrandomsampler
         if is_filter:
             print("openset here!")
+
             trainloader = torch.utils.data.DataLoader(
                 trainset, batch_size=batch_size, shuffle=False,
                 num_workers=num_workers, pin_memory=pin_memory,
@@ -87,16 +89,16 @@ class CIFAR10(object):
         self.testloader = testloader
         self.num_classes = known_class
 
-    def filter_known_unknown(self, dataset):
+    def filter_known_unknown(self, dataset): #filter the known class
         filter_ind = []
         for i in range(len(dataset.targets)):
             c = dataset.targets[i]
-            c = lab_conv(knownclass_list, [c])
+            c = lab_conv(knownclass_list, [c]) #map the label to the known class
             if c < known_class:
-                filter_ind.append(i)
+                filter_ind.append(i) #append the index of the known class
         return filter_ind
 
-    def filter_known_unknown_10percent(self, dataset):
+    def filter_known_unknown_10percent(self, dataset): # initial split for Active Learning, It separates all known-class samples from unknown-class samples
         filter_ind = []
         unlabeled_ind = []
         for i in range(len(dataset.targets)):

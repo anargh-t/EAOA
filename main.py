@@ -14,43 +14,45 @@ import datasets
 from utils import AverageMeter, get_splits, lab_conv
 import torch.nn.functional as F
 
+# Argument parser for configuring the CIFAR-10 active learning run
 parser = argparse.ArgumentParser("Rethinking Epistemic and Aleatoric Uncertainty for Active Open-Set Annotation: An Energy-Based Approach (CIFAR-10 only)")
 # dataset (CIFAR-10 only)
 parser.add_argument('-d', '--dataset', type=str, default='cifar10', choices=['cifar10'])
 parser.add_argument('-j', '--workers', default=0, type=int,
                     help="number of data loading workers (default: 0)")
 # optimization
+# Mini-batch size for training and evaluation
 parser.add_argument('--batch-size', type=int, default=128)
 parser.add_argument('--lr-model', type=float, default=0.01, help="learning rate for model")
-parser.add_argument('--max-epoch', type=int, default=200)
-parser.add_argument('--max-query', type=int, default=11)
-parser.add_argument('--query-batch', type=int, default=1500)
-parser.add_argument('--stepsize', type=int, default=60)
-parser.add_argument('--gamma', type=float, default=0.5, help="learning rate decay")
-parser.add_argument('--query-strategy', type=str, default='eaoa_sampling', choices=['random', 'eaoa_sampling'])
+parser.add_argument('--max-epoch', type=int, default=200)  # epochs per active-learning round
+parser.add_argument('--max-query', type=int, default=11)  # number of active-learning rounds
+parser.add_argument('--query-batch', type=int, default=1500)  # samples to annotate per round (budget)
+parser.add_argument('--stepsize', type=int, default=60)  # LR scheduler step
+parser.add_argument('--gamma', type=float, default=0.5, help="learning rate decay")  # LR scheduler gamma
+parser.add_argument('--query-strategy', type=str, default='eaoa_sampling', choices=['random', 'eaoa_sampling'])  # strategy to select new labels
 
 # model
 parser.add_argument('--model', type=str, default='resnet18')
 # misc
-parser.add_argument('--eval-freq', type=int, default=200)
+parser.add_argument('--eval-freq', type=int, default=200)  # evaluate every N epochs
 parser.add_argument('--gpu', type=str, default='0')
 parser.add_argument('--seed', type=int, default=1)
 parser.add_argument('--use-cpu', action='store_true')
 # openset
 parser.add_argument('--is-filter', type=bool, default=True)
 parser.add_argument('--is-mini', type=bool, default=True)
-parser.add_argument('--known-class', type=int, default=4)
-parser.add_argument('--init-percent', type=int, default=16)
+parser.add_argument('--known-class', type=int, default=4)  # number of known classes C
+parser.add_argument('--init-percent', type=int, default=16)  # initial labeled percent among known-class data
 
 ########
-parser.add_argument('--energy-weight', type=float, default=0.01)
-parser.add_argument('--m-in', type=float, default=-25)
-parser.add_argument('--m-out', type=float, default=-7)
+parser.add_argument('--energy-weight', type=float, default=0.01)  # weight for energy-margin loss
+parser.add_argument('--m-in', type=float, default=-25)  # margin for in-distribution energy
+parser.add_argument('--m-out', type=float, default=-7)  # margin for out-of-distribution energy
 
-parser.add_argument('--k1', type=float, default=5)
-parser.add_argument('--a', type=float, default=1)
-parser.add_argument('--z', type=float, default=0.05)
-parser.add_argument('--target_precision', type=float, default=0.6)
+parser.add_argument('--k1', type=float, default=5)  # top-k multiplier for candidate set size
+parser.add_argument('--a', type=float, default=1)  # k1 adjustment step
+parser.add_argument('--z', type=float, default=0.05)  # tolerance around target precision
+parser.add_argument('--target_precision', type=float, default=0.6)  # target precision for queried labels
 
     
 
@@ -58,6 +60,7 @@ args = parser.parse_args()
 
 import logging
 
+# Set up per-run logfile (helps reproduce and analyze runs)
 logging_filename = args.dataset + "_strategy_" + args.query_strategy + "_known-class_" + str(args.known_class) \
                     + "_energy-weight_" + str(args.energy_weight) + "_m-in_" + str(args.m_in) + "_m-out_" + str(args.m_out) \
                     + "_k1_" + str(args.k1) + "_a_" + str(args.a) + "_z_" + str(args.z) + "_seed_" + str(args.seed) + ".log"
@@ -88,10 +91,11 @@ def main():
     all_accuracies, all_open_accuracies = [], []
     all_precisions = []
     all_recalls = []
+    # Determine which raw CIFAR-10 classes become the C known classes
     knownclass = get_splits(args.dataset, seed, args.known_class)  
     print("Known Classes", knownclass)
     torch.manual_seed(args.seed)
-    os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+    os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu  # select GPU
     use_gpu = torch.cuda.is_available()
     if args.use_cpu: use_gpu = False
 
@@ -103,6 +107,7 @@ def main():
         print("Currently using CPU")
 
     print("Creating dataset: {}".format(args.dataset))
+    # Construct loaders with labeled/unlabeled split for CIFAR-10
     dataset = datasets.create(
         name=args.dataset, known_class_=args.known_class, knownclass=knownclass, init_percent_=args.init_percent,
         batch_size=args.batch_size, use_gpu=use_gpu,
@@ -118,15 +123,15 @@ def main():
     print("Creating model: {}".format(args.model))
     start_time = time.time()
 
-    Acc_model_ID, Acc_model_ID_w_OOD = {}, {}
-    Err_model_ID, Err_model_ID_w_OOD = {}, {}
+    Acc_model_ID, Acc_model_ID_w_OOD = {}, {}  # per-round test accuracy
+    Err_model_ID, Err_model_ID_w_OOD = {}, {}  # per-round test error
     Precision = {}
     Recall = {}
     
     for query in tqdm(range(args.max_query)):
         # Model initialization (CIFAR-10)
-        model_ID = ResNet18(n_class=dataset.num_classes)
-        model_ID_w_OOD = ResNet18(n_class=dataset.num_classes+1)
+        model_ID = ResNet18(n_class=dataset.num_classes)        # C-way classifier
+        model_ID_w_OOD = ResNet18(n_class=dataset.num_classes+1)  # C+1-way detector (unknown class)
 
         if use_gpu:
             model_ID = nn.DataParallel(model_ID).cuda()
@@ -135,12 +140,12 @@ def main():
         # Loss for classification; energy loss is added inside train_model_ID_w_OOD
         criterion_xent = nn.CrossEntropyLoss()
 
-        optimizer_model_ID = torch.optim.SGD(model_ID.parameters(), lr=args.lr_model, weight_decay=5e-04, momentum=0.9)
-        optimizer_model_ID_w_OOD = torch.optim.SGD(model_ID_w_OOD.parameters(), lr=args.lr_model, weight_decay=5e-04, momentum=0.9)
+        optimizer_model_ID = torch.optim.SGD(model_ID.parameters(), lr=args.lr_model, weight_decay=5e-04, momentum=0.9)  # optimizer for C-way
+        optimizer_model_ID_w_OOD = torch.optim.SGD(model_ID_w_OOD.parameters(), lr=args.lr_model, weight_decay=5e-04, momentum=0.9)  # optimizer for C+1
 
         if args.stepsize > 0:
-            scheduler_ID = lr_scheduler.StepLR(optimizer_model_ID, step_size=args.stepsize, gamma=args.gamma)
-            scheduler_ID_w_OOD = lr_scheduler.StepLR(optimizer_model_ID_w_OOD, step_size=args.stepsize, gamma=args.gamma)
+            scheduler_ID = lr_scheduler.StepLR(optimizer_model_ID, step_size=args.stepsize, gamma=args.gamma)  # LR schedule C-way
+            scheduler_ID_w_OOD = lr_scheduler.StepLR(optimizer_model_ID_w_OOD, step_size=args.stepsize, gamma=args.gamma)  # LR schedule C+1
 
         # Model training
         for epoch in tqdm(range(args.max_epoch)):
@@ -159,6 +164,7 @@ def main():
                 scheduler_ID_w_OOD.step()
 
             # Periodic evaluation
+            # Evaluate periodically and at the final epoch of the round
             if args.eval_freq > 0 and (epoch+1) % args.eval_freq == 0 or (epoch+1) == args.max_epoch:
                 print("==> Test")
                 acc_ID, err_ID = test(model_ID, testloader, use_gpu, knownclass)
@@ -177,12 +183,13 @@ def main():
         Acc_model_ID_w_OOD[query], Err_model_ID_w_OOD[query] = float(acc_ID_w_OOD), float(err_ID_w_OOD)
         
         queryIndex = []
-        query_model = model_ID_w_OOD
+        query_model = model_ID_w_OOD  # use the C+1 detector to drive EAOA sampling
         if args.query_strategy == "random":
             queryIndex, invalidIndex, Precision[query], Recall[query] = query_strategies.random_sampling(args, unlabeledloader, len(labeled_ind_train), query_model, knownclass)
         elif args.query_strategy == "eaoa_sampling":
             queryIndex, invalidIndex, Precision[query], Recall[query] = query_strategies.eaoa_sampling(args, unlabeledloader, len(labeled_ind_train), query_model, model_ID, knownclass, use_gpu, query, trainloader_ID, trainloader_ID_w_OOD)
             # Adapt k1 if measured precision deviates from target
+            # Adapt k1 to keep query precision near target
             if abs(Precision[query] - args.target_precision) > args.z:
                 if Precision[query] > args.target_precision:
                     args.k1 += args.a
@@ -193,12 +200,14 @@ def main():
 
 
         # Update labeled, unlabeled and invalid set
+        # Move queried indices from unlabeled to labeled pool
         unlabeled_ind_train = list(set(unlabeled_ind_train)-set(queryIndex))
         labeled_ind_train = list(labeled_ind_train) + list(queryIndex)
         invalidList = list(invalidList) + list(invalidIndex)
 
         print("Query Strategy: "+args.query_strategy+" | Query Budget: "+str(args.query_batch)+" | Valid Query Nums: "+str(len(queryIndex))+" | Query Precision: "+str(Precision[query])+" | Query Recall: "+str(Recall[query])+" | Training Nums: "+str(len(labeled_ind_train)))
         logging.info("Query Strategy: "+args.query_strategy+" | Query Budget: "+str(args.query_batch)+" | Valid Query Nums: "+str(len(queryIndex))+" | Query Precision: "+str(Precision[query])+" | Query Recall: "+str(Recall[query])+" | Training Nums: "+str(len(labeled_ind_train)))
+        # Rebuild dataset splits after each query round
         dataset = datasets.create(
             name=args.dataset, known_class_=args.known_class, knownclass=knownclass, init_percent_=args.init_percent,
             batch_size=args.batch_size, use_gpu=use_gpu,
@@ -206,6 +215,7 @@ def main():
             unlabeled_ind_train=list(set(unlabeled_ind_train) - set(invalidList)), labeled_ind_train=labeled_ind_train+invalidList,
         )
         trainloader_ID_w_OOD, testloader, unlabeledloader = dataset.trainloader, dataset.testloader, dataset.unlabeledloader
+        # Separate loader for training the C-way classifier on updated labeled set
         trainloader_ID = datasets.create(
             name=args.dataset, known_class_=args.known_class, knownclass=knownclass, init_percent_=args.init_percent,
             batch_size=args.batch_size, use_gpu=use_gpu,
@@ -236,8 +246,8 @@ def main():
 def train_model_ID(model, criterion_xent, optimizer_model, trainloader, use_gpu, knownclass):
     """Train the C-way classifier on labeled known-class samples only."""
     model.train()
-    xent_losses = AverageMeter()
-    losses = AverageMeter()
+    xent_losses = AverageMeter() #track the average cross-entropy and total loss during training.
+    losses = AverageMeter() 
 
     for batch_idx, (data, labels) in enumerate(trainloader):
         labels = lab_conv(knownclass, labels)
@@ -250,7 +260,7 @@ def train_model_ID(model, criterion_xent, optimizer_model, trainloader, use_gpu,
         data_known = data[known_mask]
         labels_known = labels[known_mask]
         outputs, _ = model(data_known)
-        loss_xent = criterion_xent(outputs, labels_known)
+        loss_xent = criterion_xent(outputs, labels_known) #cross-entropy loss
         loss = loss_xent
         optimizer_model.zero_grad()
         loss.backward()
@@ -292,7 +302,7 @@ def train_model_ID_w_OOD(model, criterion_xent, optimizer_model, trainloader_ID_
         out_term = torch.pow(F.relu(m_out - Ec_out), 2).mean() if (labels==len(knownclass)).any() else 0.
         loss_energy = in_term + out_term
         
-        loss = loss_xent + args.energy_weight*loss_energy
+        loss = loss_xent + args.energy_weight*loss_energy #cross-entropy and energy losses
 
         optimizer_model.zero_grad()
         loss.backward()
@@ -314,8 +324,8 @@ def test(model, testloader, use_gpu, knownclass):
             total += labels.size(0)
             correct += (predictions == labels.data).sum()
 
-    acc = correct * 100. / total
-    err = 100. - acc
+    acc = correct * 100. / total  # accuracy percentage
+    err = 100. - acc  # error percentage
     return acc, err
 
 
