@@ -11,7 +11,7 @@ from tqdm import tqdm
 from resnet import ResNet18
 import query_strategies
 import datasets
-from utils import AverageMeter, get_splits, lab_conv
+from utils import AverageMeter, get_splits, lab_conv, scaled_free_energy
 import torch.nn.functional as F
 
 # Argument parser for configuring the CIFAR-10 active learning run
@@ -53,6 +53,7 @@ parser.add_argument('--k1', type=float, default=5)  # top-k multiplier for candi
 parser.add_argument('--a', type=float, default=1)  # k1 adjustment step
 parser.add_argument('--z', type=float, default=0.05)  # tolerance around target precision
 parser.add_argument('--target_precision', type=float, default=0.6)  # target precision for queried labels
+parser.add_argument('--temperature', type=float, default=1000.0, help="Temperature T for scaled energy computations")
 
     
 
@@ -282,6 +283,7 @@ def train_model_ID_w_OOD(model, criterion_xent, optimizer_model, trainloader_ID_
 
     m_in = args.m_in 
     m_out = args.m_out 
+    temperature = args.temperature
 
     for batch_idx, (data, labels) in enumerate(trainloader_ID_w_OOD):
 
@@ -296,10 +298,16 @@ def train_model_ID_w_OOD(model, criterion_xent, optimizer_model, trainloader_ID_
             continue
         loss_xent = criterion_xent(outputs[ce_mask], labels[ce_mask])
 
-        Ec_out = -torch.logsumexp(outputs[labels==len(knownclass),:-1], dim=1) if (labels==len(knownclass)).any() else torch.tensor(0., device=outputs.device)
-        Ec_in = -torch.logsumexp(outputs[labels<len(knownclass), :-1], dim=1) if (labels<len(knownclass)).any() else torch.tensor(0., device=outputs.device)
-        in_term = torch.pow(F.relu(Ec_in - m_in), 2).mean() if (labels<len(knownclass)).any() else 0.
-        out_term = torch.pow(F.relu(m_out - Ec_out), 2).mean() if (labels==len(knownclass)).any() else 0.
+        energy_known_classes = scaled_free_energy(outputs[:, :-1], temperature)
+        in_mask = labels < len(knownclass)
+        out_mask = labels == len(knownclass)
+
+        zero = outputs.new_zeros(1).squeeze()
+        Ec_in = energy_known_classes[in_mask] if in_mask.any() else None
+        Ec_out = energy_known_classes[out_mask] if out_mask.any() else None
+
+        in_term = torch.pow(F.relu(Ec_in - m_in), 2).mean() if Ec_in is not None else zero
+        out_term = torch.pow(F.relu(m_out - Ec_out), 2).mean() if Ec_out is not None else zero
         loss_energy = in_term + out_term
         
         loss = loss_xent + args.energy_weight*loss_energy #cross-entropy and energy losses

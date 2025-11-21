@@ -64,3 +64,27 @@ class AverageMeter(object):
         self.count += n
         self.avg = self.sum / self.count
 
+
+def scaled_free_energy(logits, temperature, class_indices=None):
+    """
+    Compute the scaled free energy E(x; Y, T) = -T * log sum_{c in Y} exp(f_c(x) / T).
+
+    Args:
+        logits (Tensor): shape (N, C) tensor of class logits.
+        temperature (float): positive temperature scaling parameter T.
+        class_indices (slice or Tensor or list, optional): subset of classes Y.
+            If None, uses all classes.
+
+    Returns:
+        Tensor of shape (N,) with the scaled free energy for each sample.
+    """
+    if class_indices is None:
+        selected_logits = logits
+    else:
+        selected_logits = logits[:, class_indices]
+
+    if temperature <= 0:
+        raise ValueError("Temperature must be positive for scaled free energy.")
+
+    return -temperature * torch.logsumexp(selected_logits / temperature, dim=1)
+
