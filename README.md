@@ -2,6 +2,8 @@
 
 This repository contains a clean, CIFAR-10-only implementation of an energy-based active learning approach for open-set annotation (EAOA). The pipeline maintains two heads: a C-way classifier for known classes and a C+1 detector for unknown/ID separation. It queries new labels by first filtering to low epistemic uncertainty (likely closed-set) and then selecting high aleatoric uncertainty samples. The candidate width is adapted per round to hit a target query precision.
 
+New in this update: a Temperature-Scaled EAOA (TS-EAOA) sampler that follows the algorithm described in the TS-EAOA note. TS-EAOA replaces the rKNN/GMM heuristics with analytical, temperature-controlled free-energy scores for both epistemic and aleatoric uncertainty.
+
 ## Key ideas (one slide)
 - Two heads: C-way classifier (AU) + C+1 detector (EU with energy loss)
 - Candidate filtering: low EU → AU is meaningful
@@ -20,12 +22,15 @@ CIFAR-10 is downloaded automatically by `torchvision` to `./data/cifar10` on fir
 
 ## Quick start (CIFAR-10 only)
 
-```
+``` 
 python main.py --query-strategy eaoa_sampling --init-percent 1 --known-class 2 --query-batch 1500 --seed 1 --model resnet18 --dataset cifar10 --max-query 11 --max-epoch 200 --gpu 0
 
 python main.py --query-strategy eaoa_sampling --init-percent 1 --known-class 3 --query-batch 1500 --seed 1 --model resnet18 --dataset cifar10 --max-query 11 --max-epoch 200 --gpu 0
 
 python main.py --query-strategy eaoa_sampling --init-percent 1 --known-class 4 --query-batch 1500 --seed 1 --model resnet18 --dataset cifar10 --max-query 11 --max-epoch 200 --gpu 0
+
+# Temperature-scaled sampler
+python main.py --query-strategy ts_eaoa_sampling --temperature 0.5 --init-percent 1 --known-class 4 --query-batch 1500 --seed 1 --model resnet18 --dataset cifar10 --max-query 11 --max-epoch 200 --gpu 0
 ```
 
 
@@ -35,6 +40,7 @@ Flags you may tweak:
 - `--query-batch`: labels acquired per AL round
 - `--energy-weight, --m-in, --m-out`: energy-margin loss hyperparams (C+1 head)
 - `--target_precision, --z, --k1, --a`: adaptive candidate sizing
+- `--temperature`: temperature parameter `T` for TS-EAOA free energies (defaults to 1.0; try {1.0, 0.5, 2.0} for the controlled experiment described in the note)
 
 GPU vs CPU:
 - Use GPU: `--gpu 0` (and ensure `torch.cuda.is_available()` is True)
@@ -58,9 +64,10 @@ This generates:
 - `main.py`: AL loop, model training, evaluation, EAOA querying, k1 adaptation
 - `datasets.py`: CIFAR-10 loaders and labeled/unlabeled/test splits
 - `resnet.py`: small-image ResNet18 returning logits and embeddings
-- `query_strategies.py`: EAOA sampling (AU/EU, GMMs, rKNN, per-class select)
+- `query_strategies.py`: both the original EAOA sampling (AU/EU, GMMs, rKNN, per-class select) and the new TS-EAOA implementation.
 - `utils.py`: label mapping, split seed, meters
 - `plot_logs.py`: log parsing and the three must-have plots
+- `TS-EAOA.md`: detailed description of the temperature-scaled sampler and how to reproduce the controlled temperature sweep
 
 ## Reference
 If you use or extend this implementation, please cite the original paper that inspired this code and our cleaned CIFAR-10-only re-implementation:
